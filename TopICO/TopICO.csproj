@@ -14,7 +14,6 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
-    <DefaultItemExcludes>$(DefaultItemExcludes);DEBUG\**</DefaultItemExcludes>
   </PropertyGroup>
 
 </Project>
