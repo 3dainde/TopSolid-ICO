@@ -5,6 +5,9 @@ namespace TopICO;
 
 public partial class Form1 : Form
 {
+    private const string LegacyTopAutoProgId = "top_auto_file";
+    private const string PreferredTopProgId = "TopSolid.SolidDocument";
+
     private Label lblTitle = null!;
     private Label lblStatus = null!;
     private Label lblVersion = null!;
@@ -245,6 +248,7 @@ public partial class Form1 : Form
         try
         {
             issues += ScanClassesRootForIconIssues(best, ref totalFound);
+            issues += AnalyzeTopAutoFileAssociation();
         }
         catch (Exception ex)
         {
@@ -461,6 +465,7 @@ public partial class Form1 : Form
         try
         {
             FixClassesRoot(best, ref fixed_, ref errors);
+            FixTopAutoFileAssociation(ref fixed_, ref errors);
         }
         catch (Exception ex)
         {
@@ -553,6 +558,75 @@ public partial class Form1 : Form
                 FixHKCRSubKey(sub, subName, best, vPattern, ref fixed_, ref errors);
             }
             catch { }
+        }
+    }
+
+    private int AnalyzeTopAutoFileAssociation()
+    {
+        int issues = 0;
+
+        try
+        {
+            using var topKey = Registry.ClassesRoot.OpenSubKey(@".top");
+            string? progId = topKey?.GetValue(null) as string;
+            if (string.Equals(progId, LegacyTopAutoProgId, StringComparison.OrdinalIgnoreCase))
+            {
+                Log($"  INVALIDE : HKCR\\.top\\(Default)", Color.Red);
+                Log($"       -> {LegacyTopAutoProgId}", Color.Red);
+                Log($"       (sera corrigé vers {PreferredTopProgId})", Color.FromArgb(200, 100, 0));
+                issues++;
+            }
+
+            using var legacyKey = Registry.ClassesRoot.OpenSubKey(LegacyTopAutoProgId);
+            if (legacyKey != null)
+            {
+                Log($"  ANCIEN : HKCR\\{LegacyTopAutoProgId}", Color.DarkOrange);
+                Log("       (clé obsolète détectée, sera supprimée)", Color.Gray);
+                issues++;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"  Erreur analyse top_auto_file: {ex.Message}", Color.Red);
+        }
+
+        return issues;
+    }
+
+    private void FixTopAutoFileAssociation(ref int fixed_, ref int errors)
+    {
+        try
+        {
+            using var topKey = Registry.ClassesRoot.OpenSubKey(@".top", writable: true);
+            string? progId = topKey?.GetValue(null) as string;
+            if (topKey != null && string.Equals(progId, LegacyTopAutoProgId, StringComparison.OrdinalIgnoreCase))
+            {
+                topKey.SetValue(null, PreferredTopProgId);
+                Log($"  CORRIGÉ: HKCR\\.top\\(Default) -> {PreferredTopProgId}", Color.DarkGreen);
+                fixed_++;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"  ERREUR: HKCR\\.top\\(Default): {ex.Message}", Color.Red);
+            errors++;
+        }
+
+        try
+        {
+            using var hkcr = Registry.ClassesRoot;
+            using var legacyKey = hkcr.OpenSubKey(LegacyTopAutoProgId);
+            if (legacyKey != null)
+            {
+                hkcr.DeleteSubKeyTree(LegacyTopAutoProgId, throwOnMissingSubKey: false);
+                Log($"  SUPPRIMÉ: HKCR\\{LegacyTopAutoProgId}", Color.DarkGreen);
+                fixed_++;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"  ERREUR: suppression HKCR\\{LegacyTopAutoProgId}: {ex.Message}", Color.Red);
+            errors++;
         }
     }
 
