@@ -170,9 +170,7 @@ public partial class Form1 : Form
             {
                 int verNum = int.Parse(match.Groups[1].Value);
                 if (verNum < 610 || verNum > 629) continue;
-                string topExe = Path.Combine(dir, "Top", "TopSolid.exe");
-                string topExe2 = Path.Combine(dir, "TopSolid.exe");
-                bool hasExe = File.Exists(topExe) || File.Exists(topExe2);
+                bool hasExe = FindTopSolidExecutable(dir, verNum) != null;
 
                 var install = new V6Installation(folderName, dir, verNum);
                 _detectedVersions.Add(install);
@@ -570,15 +568,39 @@ public partial class Form1 : Form
         new(@".dft", PreferredDftProgId),
     };
 
-    private static string? GetTopSolidExePath(V6Installation best)
+    private static string? FindTopSolidExecutable(string installPath, int versionNumber)
     {
-        string topExe = Path.Combine(best.FullPath, "Top", "TopSolid.exe");
-        if (File.Exists(topExe)) return topExe;
+        string[] preferredCandidates =
+        {
+            Path.Combine(installPath, "bin", $"top{versionNumber}.exe"),
+            Path.Combine(installPath, "Top", "TopSolid.exe"),
+            Path.Combine(installPath, "TopSolid.exe"),
+        };
 
-        string topExeFlat = Path.Combine(best.FullPath, "TopSolid.exe");
-        if (File.Exists(topExeFlat)) return topExeFlat;
+        foreach (string candidate in preferredCandidates)
+        {
+            if (File.Exists(candidate))
+                return candidate;
+        }
+
+        string binPath = Path.Combine(installPath, "bin");
+        if (Directory.Exists(binPath))
+        {
+            var topExe = Directory
+                .GetFiles(binPath, "top*.exe", SearchOption.TopDirectoryOnly)
+                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault();
+
+            if (!string.IsNullOrWhiteSpace(topExe))
+                return topExe;
+        }
 
         return null;
+    }
+
+    private static string? GetTopSolidExePath(V6Installation best)
+    {
+        return FindTopSolidExecutable(best.FullPath, best.VersionNumber);
     }
 
     private static RegistryKey? OpenClassesScopeRoot(RegistryKey hiveRoot, string classesSubPath, bool writable)
@@ -611,12 +633,16 @@ public partial class Form1 : Form
                 {
                     using var extKey = classesRoot.OpenSubKey(rule.Extension);
                     string? actualProgId = extKey?.GetValue(null) as string;
+                    bool mandatoryScope = string.Equals(scope.Display, "HKCR", StringComparison.OrdinalIgnoreCase);
 
-                    if (string.IsNullOrWhiteSpace(actualProgId))
+                    if (extKey == null)
                     {
-                        Log($"  MANQUANT : {scope.Display}\\{rule.Extension}\\(Default)", Color.FromArgb(200, 100, 0));
-                        Log($"       (sera défini vers {rule.ProgId})", Color.FromArgb(200, 100, 0));
-                        issues++;
+                        if (mandatoryScope)
+                        {
+                            Log($"  MANQUANT : {scope.Display}\\{rule.Extension}\\(Default)", Color.FromArgb(200, 100, 0));
+                            Log($"       (sera défini vers {rule.ProgId})", Color.FromArgb(200, 100, 0));
+                            issues++;
+                        }
                     }
                     else if (!string.Equals(actualProgId, rule.ProgId, StringComparison.OrdinalIgnoreCase))
                     {
@@ -626,12 +652,19 @@ public partial class Form1 : Form
                         issues++;
                     }
 
+                    using var progIdKey = classesRoot.OpenSubKey(rule.ProgId);
+                    if (progIdKey == null && !mandatoryScope)
+                        continue;
+
                     using var commandKey = classesRoot.OpenSubKey($@"{rule.ProgId}\\shell\\open\\command");
                     string? command = commandKey?.GetValue(null) as string;
                     if (string.IsNullOrWhiteSpace(command))
                     {
-                        Log($"  MANQUANT : {scope.Display}\\{rule.ProgId}\\shell\\open\\command", Color.FromArgb(200, 100, 0));
-                        issues++;
+                        if (mandatoryScope || progIdKey != null)
+                        {
+                            Log($"  MANQUANT : {scope.Display}\\{rule.ProgId}\\shell\\open\\command", Color.FromArgb(200, 100, 0));
+                            issues++;
+                        }
                     }
                     else if (topExe != null && !command.Contains(topExe, StringComparison.OrdinalIgnoreCase))
                     {
@@ -658,7 +691,7 @@ public partial class Form1 : Form
 
         if (topExe == null)
         {
-            Log("  Erreur : TopSolid.exe introuvable sur la version détectée.", Color.Red);
+            Log("  Erreur : exécutable TopSolid introuvable sur la version détectée.", Color.Red);
             issues++;
         }
 
@@ -676,6 +709,7 @@ public partial class Form1 : Form
         }
 
         string expectedCommand = $"\"{topExe}\" \"%1\"";
+        const string expectedDde = "[open(\"%1\")]";
 
         var scopes = new[]
         {
@@ -693,32 +727,52 @@ public partial class Form1 : Form
 
                 foreach (var rule in AssocRules)
                 {
-                    using var extKey = classesRoot.CreateSubKey(rule.Extension, writable: true);
-                    string? actualProgId = extKey?.GetValue(null) as string;
-                    if (extKey != null && !string.Equals(actualProgId, rule.ProgId, StringComparison.OrdinalIgnoreCase))
+                    bool mandatoryScope = string.Equals(scope.Display, "HKCR", StringComparison.OrdinalIgnoreCase);
+
+                    RegistryKey? extKey = mandatoryScope
+                        ? classesRoot.CreateSubKey(rule.Extension, writable: true)
+                        : classesRoot.OpenSubKey(rule.Extension, writable: true);
+
+                    if (extKey != null)
                     {
-                        extKey.SetValue(null, rule.ProgId);
-                        Log($"  CORRIGÉ: {scope.Display}\\{rule.Extension}\\(Default) -> {rule.ProgId}", Color.DarkGreen);
-                        fixed_++;
+                        using (extKey)
+                        {
+                            string? actualProgId = extKey.GetValue(null) as string;
+                            if (!string.Equals(actualProgId, rule.ProgId, StringComparison.OrdinalIgnoreCase))
+                            {
+                                extKey.SetValue(null, rule.ProgId);
+                                Log($"  CORRIGÉ: {scope.Display}\\{rule.Extension}\\(Default) -> {rule.ProgId}", Color.DarkGreen);
+                                fixed_++;
+                            }
+                        }
                     }
 
-                    using var commandKey = classesRoot.CreateSubKey($@"{rule.ProgId}\\shell\\open\\command", writable: true);
-                    string? currentCommand = commandKey?.GetValue(null) as string;
-                    if (commandKey != null && !string.Equals(currentCommand, expectedCommand, StringComparison.OrdinalIgnoreCase))
-                    {
-                        commandKey.SetValue(null, expectedCommand);
-                        Log($"  CORRIGÉ: {scope.Display}\\{rule.ProgId}\\shell\\open\\command", Color.DarkGreen);
-                        fixed_++;
-                    }
+                    RegistryKey? progIdKey = mandatoryScope
+                        ? classesRoot.CreateSubKey(rule.ProgId, writable: true)
+                        : classesRoot.OpenSubKey(rule.ProgId, writable: true);
 
-                    using var ddeKey = classesRoot.CreateSubKey($@"{rule.ProgId}\\shell\\open\\ddeexec", writable: true);
-                    string? currentDde = ddeKey?.GetValue(null) as string;
-                    const string expectedDde = "[open(\"%1\")]";
-                    if (ddeKey != null && !string.Equals(currentDde, expectedDde, StringComparison.OrdinalIgnoreCase))
+                    if (progIdKey != null)
                     {
-                        ddeKey.SetValue(null, expectedDde);
-                        Log($"  CORRIGÉ: {scope.Display}\\{rule.ProgId}\\shell\\open\\ddeexec", Color.DarkGreen);
-                        fixed_++;
+                        using (progIdKey)
+                        {
+                            using var commandKey = progIdKey.CreateSubKey(@"shell\\open\\command", writable: true);
+                            string? currentCommand = commandKey?.GetValue(null) as string;
+                            if (commandKey != null && !string.Equals(currentCommand, expectedCommand, StringComparison.OrdinalIgnoreCase))
+                            {
+                                commandKey.SetValue(null, expectedCommand);
+                                Log($"  CORRIGÉ: {scope.Display}\\{rule.ProgId}\\shell\\open\\command", Color.DarkGreen);
+                                fixed_++;
+                            }
+
+                            using var ddeKey = progIdKey.CreateSubKey(@"shell\\open\\ddeexec", writable: true);
+                            string? currentDde = ddeKey?.GetValue(null) as string;
+                            if (ddeKey != null && !string.Equals(currentDde, expectedDde, StringComparison.OrdinalIgnoreCase))
+                            {
+                                ddeKey.SetValue(null, expectedDde);
+                                Log($"  CORRIGÉ: {scope.Display}\\{rule.ProgId}\\shell\\open\\ddeexec", Color.DarkGreen);
+                                fixed_++;
+                            }
+                        }
                     }
                 }
 
