@@ -7,6 +7,7 @@ public partial class Form1 : Form
 {
     private const string LegacyTopAutoProgId = "top_auto_file";
     private const string PreferredTopProgId = "TopSolid.SolidDocument";
+    private const string PreferredDftProgId = "TopSolid.DraftDocument";
 
     private Label lblTitle = null!;
     private Label lblStatus = null!;
@@ -121,7 +122,7 @@ public partial class Form1 : Form
         // Version label
         lblVersion = new Label
         {
-            Text = "v1.0.0",
+            Text = $"v{Application.ProductVersion}",
             Font = new Font("Segoe UI", 9, FontStyle.Regular),
             ForeColor = Color.FromArgb(220, 50, 20),
             AutoSize = true,
@@ -248,7 +249,7 @@ public partial class Form1 : Form
         try
         {
             issues += ScanClassesRootForIconIssues(best, ref totalFound);
-            issues += AnalyzeTopAutoFileAssociation();
+            issues += AnalyzeFileAssociationIssues(best);
         }
         catch (Exception ex)
         {
@@ -465,7 +466,7 @@ public partial class Form1 : Form
         try
         {
             FixClassesRoot(best, ref fixed_, ref errors);
-            FixTopAutoFileAssociation(ref fixed_, ref errors);
+            FixFileAssociations(best, ref fixed_, ref errors);
         }
         catch (Exception ex)
         {
@@ -561,72 +562,179 @@ public partial class Form1 : Form
         }
     }
 
-    private int AnalyzeTopAutoFileAssociation()
+    private readonly record struct FileAssociationRule(string Extension, string ProgId);
+
+    private static readonly FileAssociationRule[] AssocRules =
+    {
+        new(@".top", PreferredTopProgId),
+        new(@".dft", PreferredDftProgId),
+    };
+
+    private static string? GetTopSolidExePath(V6Installation best)
+    {
+        string topExe = Path.Combine(best.FullPath, "Top", "TopSolid.exe");
+        if (File.Exists(topExe)) return topExe;
+
+        string topExeFlat = Path.Combine(best.FullPath, "TopSolid.exe");
+        if (File.Exists(topExeFlat)) return topExeFlat;
+
+        return null;
+    }
+
+    private static RegistryKey? OpenClassesScopeRoot(RegistryKey hiveRoot, string classesSubPath, bool writable)
+    {
+        return string.IsNullOrEmpty(classesSubPath)
+            ? hiveRoot
+            : hiveRoot.OpenSubKey(classesSubPath, writable);
+    }
+
+    private int AnalyzeFileAssociationIssues(V6Installation best)
     {
         int issues = 0;
+        string? topExe = GetTopSolidExePath(best);
 
-        try
+        var scopes = new[]
         {
-            using var topKey = Registry.ClassesRoot.OpenSubKey(@".top");
-            string? progId = topKey?.GetValue(null) as string;
-            if (string.Equals(progId, LegacyTopAutoProgId, StringComparison.OrdinalIgnoreCase))
-            {
-                Log($"  INVALIDE : HKCR\\.top\\(Default)", Color.Red);
-                Log($"       -> {LegacyTopAutoProgId}", Color.Red);
-                Log($"       (sera corrigé vers {PreferredTopProgId})", Color.FromArgb(200, 100, 0));
-                issues++;
-            }
+            (Display: "HKCR", Root: Registry.ClassesRoot, ClassesPath: ""),
+            (Display: "HKCU", Root: Registry.CurrentUser, ClassesPath: @"Software\Classes"),
+            (Display: "HKLM", Root: Registry.LocalMachine, ClassesPath: @"SOFTWARE\Classes"),
+        };
 
-            using var legacyKey = Registry.ClassesRoot.OpenSubKey(LegacyTopAutoProgId);
-            if (legacyKey != null)
+        foreach (var scope in scopes)
+        {
+            try
             {
-                Log($"  ANCIEN : HKCR\\{LegacyTopAutoProgId}", Color.DarkOrange);
-                Log("       (clé obsolète détectée, sera supprimée)", Color.Gray);
-                issues++;
+                using var classesRoot = OpenClassesScopeRoot(scope.Root, scope.ClassesPath, writable: false);
+                if (classesRoot == null) continue;
+
+                foreach (var rule in AssocRules)
+                {
+                    using var extKey = classesRoot.OpenSubKey(rule.Extension);
+                    string? actualProgId = extKey?.GetValue(null) as string;
+
+                    if (string.IsNullOrWhiteSpace(actualProgId))
+                    {
+                        Log($"  MANQUANT : {scope.Display}\\{rule.Extension}\\(Default)", Color.FromArgb(200, 100, 0));
+                        Log($"       (sera défini vers {rule.ProgId})", Color.FromArgb(200, 100, 0));
+                        issues++;
+                    }
+                    else if (!string.Equals(actualProgId, rule.ProgId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Log($"  INVALIDE : {scope.Display}\\{rule.Extension}\\(Default)", Color.Red);
+                        Log($"       -> {actualProgId}", Color.Red);
+                        Log($"       (sera corrigé vers {rule.ProgId})", Color.FromArgb(200, 100, 0));
+                        issues++;
+                    }
+
+                    using var commandKey = classesRoot.OpenSubKey($@"{rule.ProgId}\\shell\\open\\command");
+                    string? command = commandKey?.GetValue(null) as string;
+                    if (string.IsNullOrWhiteSpace(command))
+                    {
+                        Log($"  MANQUANT : {scope.Display}\\{rule.ProgId}\\shell\\open\\command", Color.FromArgb(200, 100, 0));
+                        issues++;
+                    }
+                    else if (topExe != null && !command.Contains(topExe, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Log($"  INVALIDE : {scope.Display}\\{rule.ProgId}\\shell\\open\\command", Color.Red);
+                        Log($"       -> {command}", Color.Red);
+                        Log($"       (sera corrigé vers {topExe})", Color.FromArgb(200, 100, 0));
+                        issues++;
+                    }
+                }
+
+                using var legacyKey = classesRoot.OpenSubKey(LegacyTopAutoProgId);
+                if (legacyKey != null)
+                {
+                    Log($"  ANCIEN : {scope.Display}\\{LegacyTopAutoProgId}", Color.DarkOrange);
+                    Log("       (clé obsolète détectée, sera supprimée)", Color.Gray);
+                    issues++;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"  Erreur analyse associations ({scope.Display}): {ex.Message}", Color.Red);
             }
         }
-        catch (Exception ex)
+
+        if (topExe == null)
         {
-            Log($"  Erreur analyse top_auto_file: {ex.Message}", Color.Red);
+            Log("  Erreur : TopSolid.exe introuvable sur la version détectée.", Color.Red);
+            issues++;
         }
 
         return issues;
     }
 
-    private void FixTopAutoFileAssociation(ref int fixed_, ref int errors)
+    private void FixFileAssociations(V6Installation best, ref int fixed_, ref int errors)
     {
-        try
+        string? topExe = GetTopSolidExePath(best);
+        if (topExe == null)
         {
-            using var topKey = Registry.ClassesRoot.OpenSubKey(@".top", writable: true);
-            string? progId = topKey?.GetValue(null) as string;
-            if (topKey != null && string.Equals(progId, LegacyTopAutoProgId, StringComparison.OrdinalIgnoreCase))
-            {
-                topKey.SetValue(null, PreferredTopProgId);
-                Log($"  CORRIGÉ: HKCR\\.top\\(Default) -> {PreferredTopProgId}", Color.DarkGreen);
-                fixed_++;
-            }
-        }
-        catch (Exception ex)
-        {
-            Log($"  ERREUR: HKCR\\.top\\(Default): {ex.Message}", Color.Red);
+            Log("  ERREUR: TopSolid.exe introuvable, correction associations impossible.", Color.Red);
             errors++;
+            return;
         }
 
-        try
+        string expectedCommand = $"\"{topExe}\" \"%1\"";
+
+        var scopes = new[]
         {
-            using var hkcr = Registry.ClassesRoot;
-            using var legacyKey = hkcr.OpenSubKey(LegacyTopAutoProgId);
-            if (legacyKey != null)
+            (Display: "HKCR", Root: Registry.ClassesRoot, ClassesPath: ""),
+            (Display: "HKCU", Root: Registry.CurrentUser, ClassesPath: @"Software\Classes"),
+            (Display: "HKLM", Root: Registry.LocalMachine, ClassesPath: @"SOFTWARE\Classes"),
+        };
+
+        foreach (var scope in scopes)
+        {
+            try
             {
-                hkcr.DeleteSubKeyTree(LegacyTopAutoProgId, throwOnMissingSubKey: false);
-                Log($"  SUPPRIMÉ: HKCR\\{LegacyTopAutoProgId}", Color.DarkGreen);
-                fixed_++;
+                using var classesRoot = OpenClassesScopeRoot(scope.Root, scope.ClassesPath, writable: true);
+                if (classesRoot == null) continue;
+
+                foreach (var rule in AssocRules)
+                {
+                    using var extKey = classesRoot.CreateSubKey(rule.Extension, writable: true);
+                    string? actualProgId = extKey?.GetValue(null) as string;
+                    if (extKey != null && !string.Equals(actualProgId, rule.ProgId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        extKey.SetValue(null, rule.ProgId);
+                        Log($"  CORRIGÉ: {scope.Display}\\{rule.Extension}\\(Default) -> {rule.ProgId}", Color.DarkGreen);
+                        fixed_++;
+                    }
+
+                    using var commandKey = classesRoot.CreateSubKey($@"{rule.ProgId}\\shell\\open\\command", writable: true);
+                    string? currentCommand = commandKey?.GetValue(null) as string;
+                    if (commandKey != null && !string.Equals(currentCommand, expectedCommand, StringComparison.OrdinalIgnoreCase))
+                    {
+                        commandKey.SetValue(null, expectedCommand);
+                        Log($"  CORRIGÉ: {scope.Display}\\{rule.ProgId}\\shell\\open\\command", Color.DarkGreen);
+                        fixed_++;
+                    }
+
+                    using var ddeKey = classesRoot.CreateSubKey($@"{rule.ProgId}\\shell\\open\\ddeexec", writable: true);
+                    string? currentDde = ddeKey?.GetValue(null) as string;
+                    const string expectedDde = "[open(\"%1\")]";
+                    if (ddeKey != null && !string.Equals(currentDde, expectedDde, StringComparison.OrdinalIgnoreCase))
+                    {
+                        ddeKey.SetValue(null, expectedDde);
+                        Log($"  CORRIGÉ: {scope.Display}\\{rule.ProgId}\\shell\\open\\ddeexec", Color.DarkGreen);
+                        fixed_++;
+                    }
+                }
+
+                using var legacyKey = classesRoot.OpenSubKey(LegacyTopAutoProgId);
+                if (legacyKey != null)
+                {
+                    classesRoot.DeleteSubKeyTree(LegacyTopAutoProgId, throwOnMissingSubKey: false);
+                    Log($"  SUPPRIMÉ: {scope.Display}\\{LegacyTopAutoProgId}", Color.DarkGreen);
+                    fixed_++;
+                }
             }
-        }
-        catch (Exception ex)
-        {
-            Log($"  ERREUR: suppression HKCR\\{LegacyTopAutoProgId}: {ex.Message}", Color.Red);
-            errors++;
+            catch (Exception ex)
+            {
+                Log($"  ERREUR: correction associations ({scope.Display}): {ex.Message}", Color.Red);
+                errors++;
+            }
         }
     }
 
