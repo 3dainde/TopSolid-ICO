@@ -6,6 +6,7 @@ namespace TopICO;
 public partial class Form1 : Form
 {
     private const string LegacyTopAutoProgId = "top_auto_file";
+    private const string LegacyDftAutoProgId = "dft_auto_file";
     private const string PreferredTopProgId = "TopSolid.SolidDocument";
     private const string PreferredDftProgId = "TopSolid.DraftDocument";
 
@@ -195,6 +196,8 @@ public partial class Form1 : Form
         Log("", Color.Black);
         Log($"Version la plus récente : {best.FolderName}", Color.DarkBlue);
         Log($"Chemin : {best.FullPath}", Color.DarkBlue);
+        string? detectedExe = GetTopSolidExePath(best);
+        Log($"Exécutable détecté : {detectedExe ?? "introuvable"}", detectedExe == null ? Color.Red : Color.DarkBlue);
 
         // Analyze registry
         Log("", Color.Black);
@@ -562,6 +565,12 @@ public partial class Form1 : Form
 
     private readonly record struct FileAssociationRule(string Extension, string ProgId);
 
+    private static readonly string[] LegacyAutoProgIds =
+    {
+        LegacyTopAutoProgId,
+        LegacyDftAutoProgId,
+    };
+
     private static readonly FileAssociationRule[] AssocRules =
     {
         new(@".top", PreferredTopProgId),
@@ -675,12 +684,15 @@ public partial class Form1 : Form
                     }
                 }
 
-                using var legacyKey = classesRoot.OpenSubKey(LegacyTopAutoProgId);
-                if (legacyKey != null)
+                foreach (string legacyProgId in LegacyAutoProgIds)
                 {
-                    Log($"  ANCIEN : {scope.Display}\\{LegacyTopAutoProgId}", Color.DarkOrange);
-                    Log("       (clé obsolète détectée, sera supprimée)", Color.Gray);
-                    issues++;
+                    using var legacyKey = classesRoot.OpenSubKey(legacyProgId);
+                    if (legacyKey != null)
+                    {
+                        Log($"  ANCIEN : {scope.Display}\\{legacyProgId}", Color.DarkOrange);
+                        Log("       (clé obsolète détectée, sera supprimée)", Color.Gray);
+                        issues++;
+                    }
                 }
             }
             catch (Exception ex)
@@ -776,12 +788,15 @@ public partial class Form1 : Form
                     }
                 }
 
-                using var legacyKey = classesRoot.OpenSubKey(LegacyTopAutoProgId);
-                if (legacyKey != null)
+                foreach (string legacyProgId in LegacyAutoProgIds)
                 {
-                    classesRoot.DeleteSubKeyTree(LegacyTopAutoProgId, throwOnMissingSubKey: false);
-                    Log($"  SUPPRIMÉ: {scope.Display}\\{LegacyTopAutoProgId}", Color.DarkGreen);
-                    fixed_++;
+                    using var legacyKey = classesRoot.OpenSubKey(legacyProgId);
+                    if (legacyKey != null)
+                    {
+                        classesRoot.DeleteSubKeyTree(legacyProgId, throwOnMissingSubKey: false);
+                        Log($"  SUPPRIMÉ: {scope.Display}\\{legacyProgId}", Color.DarkGreen);
+                        fixed_++;
+                    }
                 }
             }
             catch (Exception ex)
